@@ -8,6 +8,9 @@ import android.graphics.Canvas
 import android.graphics.Rect
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Bundle
@@ -63,7 +66,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Page { HOME, PDF, COMPRESS, PHOTO, CHECKLIST, OCR }
+private enum class Page { HOME, PDF, COMPRESS, PHOTO, CHECKLIST, OCR, PDF_EXTRACT, PDF_MERGE }
 
 private data class PhotoPreset(val label: String, val width: Int, val height: Int)
 
@@ -97,6 +100,11 @@ private fun VibeApplyApp() {
     var photoImage by remember { mutableStateOf<Uri?>(null) }
     var ocrImage by remember { mutableStateOf<Uri?>(null) }
     var ocrText by remember { mutableStateOf("") }
+    var pdfSource by remember { mutableStateOf<Uri?>(null) }
+    var pdfPageCount by remember { mutableStateOf<Int?>(null) }
+    var pdfPageRange by remember { mutableStateOf("") }
+    var selectedPdfPageNumbers by remember { mutableStateOf<List<Int>>(emptyList()) }
+    val mergePdfSources = remember { mutableStateListOf<Uri>() }
     var selectedPhotoPreset by remember { mutableStateOf(0) }
     var photoPresetMenu by remember { mutableStateOf(false) }
     val localPrefs = remember { context.getSharedPreferences("vibeapply_local", android.content.Context.MODE_PRIVATE) }
@@ -129,6 +137,34 @@ private fun VibeApplyApp() {
         ocrImage = selected
         ocrText = ""
         status = if (selected == null) "No image selected." else "Image ready for on-device text extraction."
+    }
+    val pickPdfSource = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { selected ->
+        pdfSource = selected
+        pdfPageCount = null
+        pdfPageRange = ""
+        if (selected == null) {
+            status = "No PDF selected."
+        } else {
+            busy = true
+            status = "Reading PDF page count…"
+            scope.launch {
+                val result = withContext(Dispatchers.IO) { runCatching { getPdfPageCount(context, selected) } }
+                result.fold(
+                    { count ->
+                        pdfPageCount = count
+                        pdfPageRange = if (count > 0) "1-" + count else ""
+                        status = "PDF ready • " + count + " page(s)."
+                    },
+                    { status = "Could not open PDF: " + (it.localizedMessage ?: "Unknown error") }
+                )
+                busy = false
+            }
+        }
+    }
+    val pickMergePdfs = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { selected ->
+        mergePdfSources.clear()
+        mergePdfSources.addAll(selected)
+        status = if (selected.isEmpty()) "No PDFs selected." else selected.size.toString() + " PDF file(s) ready to merge."
     }
     val createPdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { destination ->
         if (destination != null) {
@@ -169,6 +205,42 @@ private fun VibeApplyApp() {
         }
     }
 
+    val createExtractedPdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { destination ->
+        val source = pdfSource
+        val pages = selectedPdfPageNumbers
+        if (destination != null && source != null && pages.isNotEmpty()) {
+            scope.launch {
+                busy = true
+                status = "Extracting selected pages offline…"
+                val result = withContext(Dispatchers.IO) {
+                    runCatching { writeRenderedPdfPages(context, listOf(source), mapOf(source.toString() to pages), destination) }
+                }
+                status = result.fold(
+                    { "New PDF saved • " + pages.size + " page(s)." },
+                    { "Could not extract pages: " + (it.localizedMessage ?: "Unknown error") }
+                )
+                busy = false
+            }
+        }
+    }
+    val createMergedPdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { destination ->
+        val sources = mergePdfSources.toList()
+        if (destination != null && sources.size >= 2) {
+            scope.launch {
+                busy = true
+                status = "Merging PDFs offline…"
+                val result = withContext(Dispatchers.IO) {
+                    runCatching { writeRenderedPdfPages(context, sources, null, destination) }
+                }
+                status = result.fold(
+                    { "Merged PDF saved • " + sources.size + " source file(s)." },
+                    { "Could not merge PDFs: " + (it.localizedMessage ?: "Unknown error") }
+                )
+                busy = false
+                mergePdfSources.clear()
+            }
+        }
+    }
     val createPhoto = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg")) { destination ->
         val source = photoImage
         if (destination != null && source != null) {
@@ -231,6 +303,16 @@ private fun VibeApplyApp() {
                     ToolCard("OCR", "Image Text Extractor", "Read printed Latin-script text from a photo without uploading it.") {
                         page = Page.OCR
                         status = "Choose an image to extract text on this device."
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    ToolCard("PDF", "PDF Page Extractor", "Save selected pages from a PDF as a separate document.") {
+                        page = Page.PDF_EXTRACT
+                        status = "Choose a PDF to inspect its pages."
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    ToolCard("+", "Merge PDFs", "Combine several PDF files into one document.") {
+                        page = Page.PDF_MERGE
+                        status = "Choose two or more PDF files to combine."
                     }
                     Spacer(Modifier.height(20.dp))
                     Card(colors = CardDefaults.cardColors(containerColor = SurfaceDark)) {
@@ -314,6 +396,60 @@ private fun VibeApplyApp() {
                     Spacer(Modifier.height(16.dp))
                     PrimaryButton("Resize and save JPEG", photoImage != null && !busy) {
                         createPhoto.launch("VibeApply-photo.jpg")
+                    }
+                }
+                Page.PDF_EXTRACT -> {
+                    BackHeader("PDF Page Extractor") { page = Page.HOME }
+                    Text("Choose which pages to keep in a new PDF.", color = TextMuted, fontSize = 14.sp)
+                    Spacer(Modifier.height(18.dp))
+                    OutlinedButton(
+                        onClick = { pickPdfSource.launch(arrayOf("application/pdf")) },
+                        enabled = !busy, modifier = Modifier.fillMaxWidth()
+                    ) { Text(if (pdfSource == null) "Choose a PDF" else "Change PDF") }
+                    Spacer(Modifier.height(10.dp))
+                    InfoPanel(
+                        if (pdfPageCount == null) "No PDF selected" else "PDF loaded • " + pdfPageCount + " page(s)",
+                        "Enter pages like 1-3,5,8-10. Output pages are rendered as images, so selectable text and interactive form fields are not retained. Up to 30 pages per output for memory safety."
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = pdfPageRange,
+                        onValueChange = { pdfPageRange = it.take(100) },
+                        label = { Text("Pages to keep") },
+                        placeholder = { Text("Example: 1-3,5") },
+                        singleLine = true,
+                        enabled = pdfPageCount != null && !busy,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    PrimaryButton("Extract and save PDF", pdfSource != null && pdfPageCount != null && pdfPageRange.isNotBlank() && !busy) {
+                        val count = pdfPageCount ?: 0
+                        val parsed = runCatching { parsePdfPageSelection(pdfPageRange, count) }
+                        parsed.fold(
+                            { pages ->
+                                selectedPdfPageNumbers = pages
+                                createExtractedPdf.launch("VibeApply-extracted-pages.pdf")
+                            },
+                            { status = it.localizedMessage ?: "Invalid page selection." }
+                        )
+                    }
+                }
+                Page.PDF_MERGE -> {
+                    BackHeader("Merge PDFs") { page = Page.HOME }
+                    Text("Combine two or more PDF files into one new document.", color = TextMuted, fontSize = 14.sp)
+                    Spacer(Modifier.height(18.dp))
+                    OutlinedButton(
+                        onClick = { pickMergePdfs.launch(arrayOf("application/pdf")) },
+                        enabled = !busy, modifier = Modifier.fillMaxWidth()
+                    ) { Text("Choose PDF files") }
+                    Spacer(Modifier.height(10.dp))
+                    InfoPanel(
+                        mergePdfSources.size.toString() + " PDF file(s) selected",
+                        "All pages are combined in selection order. Pages are rendered as images in the output, so selectable text and interactive form fields are not retained. Up to 30 pages total per output."
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    PrimaryButton("Merge and save PDF", mergePdfSources.size >= 2 && !busy) {
+                        createMergedPdf.launch("VibeApply-merged.pdf")
                     }
                 }
                 Page.OCR -> {
@@ -627,5 +763,114 @@ private fun resizePhotoToPreset(
     } finally {
         input.recycle()
         output.recycle()
+    }
+}
+
+
+private fun getPdfPageCount(context: android.content.Context, source: Uri): Int {
+    val descriptor = context.contentResolver.openFileDescriptor(source, "r")
+        ?: throw IOException("Could not open the selected PDF")
+    return try {
+        PdfRenderer(descriptor).use { renderer -> renderer.pageCount }
+    } finally {
+        descriptor.close()
+    }
+}
+
+private fun parsePdfPageSelection(input: String, pageCount: Int): List<Int> {
+    if (pageCount < 1) throw IllegalArgumentException("The PDF has no readable pages.")
+    val selected = sortedSetOf<Int>()
+    val tokens = input.split(",").map { it.trim() }
+    if (tokens.isEmpty() || tokens.any { it.isEmpty() }) {
+        throw IllegalArgumentException("Enter page numbers like 1-3,5.")
+    }
+    tokens.forEach { token ->
+        val parts = token.split("-").map { it.trim() }
+        val start: Int
+        val end: Int
+        if (parts.size == 1) {
+            start = parts[0].toIntOrNull()
+                ?: throw IllegalArgumentException("Invalid page number: " + token)
+            end = start
+        } else if (parts.size == 2) {
+            start = parts[0].toIntOrNull()
+                ?: throw IllegalArgumentException("Invalid page range: " + token)
+            end = parts[1].toIntOrNull()
+                ?: throw IllegalArgumentException("Invalid page range: " + token)
+        } else {
+            throw IllegalArgumentException("Invalid page range: " + token)
+        }
+        if (start < 1 || end < start || end > pageCount) {
+            throw IllegalArgumentException("Page range " + token + " is outside 1-" + pageCount + ".")
+        }
+        (start..end).forEach { selected.add(it) }
+    }
+    if (selected.isEmpty()) throw IllegalArgumentException("Select at least one page.")
+    if (selected.size > 30) throw IllegalArgumentException("Export up to 30 pages at a time.")
+    return selected.toList()
+}
+
+private fun writeRenderedPdfPages(
+    context: android.content.Context,
+    sources: List<Uri>,
+    selectedPages: Map<String, List<Int>>?,
+    destination: Uri
+) {
+    if (sources.isEmpty()) throw IllegalArgumentException("Select at least one PDF.")
+    val document = PdfDocument()
+    var outputPageNumber = 1
+    try {
+        sources.forEach { source ->
+            val descriptor = context.contentResolver.openFileDescriptor(source, "r")
+                ?: throw IOException("Could not open a selected PDF")
+            try {
+                PdfRenderer(descriptor).use { renderer ->
+                    val pageNumbers = selectedPages?.get(source.toString())
+                        ?: (1..renderer.pageCount).toList()
+                    pageNumbers.forEach { pageNumber ->
+                        if (pageNumber !in 1..renderer.pageCount) {
+                            throw IllegalArgumentException("A selected page is outside the PDF.")
+                        }
+                        if (outputPageNumber > 30) {
+                            throw IllegalArgumentException("Export up to 30 pages at a time.")
+                        }
+                        val page = renderer.openPage(pageNumber - 1)
+                        try {
+                            val scale = min(1.8f, 1800f / max(page.width, page.height).toFloat())
+                            val bitmapWidth = (page.width * scale).toInt().coerceAtLeast(1)
+                            val bitmapHeight = (page.height * scale).toInt().coerceAtLeast(1)
+                            val bitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
+                            try {
+                                bitmap.eraseColor(android.graphics.Color.WHITE)
+                                val matrix = Matrix().apply { setScale(scale, scale) }
+                                page.render(bitmap, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                                val pageInfo = PdfDocument.PageInfo.Builder(
+                                    page.width, page.height, outputPageNumber
+                                ).create()
+                                val outputPage = document.startPage(pageInfo)
+                                outputPage.canvas.drawBitmap(
+                                    bitmap, null,
+                                    RectF(0f, 0f, page.width.toFloat(), page.height.toFloat()),
+                                    Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                                )
+                                document.finishPage(outputPage)
+                            } finally {
+                                bitmap.recycle()
+                            }
+                        } finally {
+                            page.close()
+                        }
+                        outputPageNumber += 1
+                    }
+                }
+            } finally {
+                descriptor.close()
+            }
+        }
+        if (outputPageNumber == 1) throw IOException("No pages were available to export.")
+        context.contentResolver.openOutputStream(destination, "w")?.use { document.writeTo(it) }
+            ?: throw IOException("Could not open the output file")
+    } finally {
+        document.close()
     }
 }
