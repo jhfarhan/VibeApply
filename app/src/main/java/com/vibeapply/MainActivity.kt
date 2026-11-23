@@ -101,10 +101,14 @@ private fun VibeApplyApp() {
     var photoPresetMenu by remember { mutableStateOf(false) }
     val localPrefs = remember { context.getSharedPreferences("vibeapply_local", android.content.Context.MODE_PRIVATE) }
     var checkedItems by remember {
-        mutableStateOf(localPrefs.getStringSet("checked_items", emptySet())?.toSet() ?: emptySet())
+        mutableStateOf<Set<String>>(
+            localPrefs.getStringSet("checked_items", emptySet<String>())?.toSet() ?: emptySet<String>()
+        )
     }
     var customItems by remember {
-        mutableStateOf(localPrefs.getStringSet("custom_items", emptySet())?.toList()?.sorted() ?: emptyList())
+        mutableStateOf<List<String>>(
+            localPrefs.getStringSet("custom_items", emptySet<String>())?.toList()?.sorted() ?: emptyList<String>()
+        )
     }
     var newChecklistItem by remember { mutableStateOf("") }
 
