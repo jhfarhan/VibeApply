@@ -46,16 +46,30 @@ Build VibeApply, an Android-first, offline-first document and application-prepar
 - Default branch: main.
 - Initial repo had only README.md.
 - Persistent project record was added in commit d7d7726968a8a0de9d287a80b56ffe67793caf16.
-- First Android implementation is now being bootstrapped: Images to PDF and Image Compressor, both using Android's file picker and on-device processing.
-- GitHub Actions workflows are being added for debug APK builds and Android emulator smoke tests on API 29 and 34.
+- First Android implementation commit: 0f60917a1c4760acdcf30300b10f9f19cbb4b84f.
+- Added Kotlin + Jetpack Compose Android project with minSdk 26, targetSdk 35, and black/red theme.
+- Added Images to PDF: multi-image selection, one fitted A4 page per image, save destination chosen through Android Create Document picker.
+- Added Image Compressor: select image, choose a target KB size, locally encode JPEG, save as a new file; original is not overwritten.
+- Uses Android Storage Access Framework; no broad storage permission, account, database server, Firebase, Supabase, or paid API.
+- Added GitHub Actions build-apk workflow to build and upload a debug APK.
+- Added emulator-test workflow configured for Android API 29 and 34; captures home/tool screenshots and logcat.
+- Workflows triggered by commit 0f60917a1c4760acdcf30300b10f9f19cbb4b84f. At last check, APK build run 45216958774 and emulator run 45216958721 were still in progress; no success/failure result has yet been verified.
+- No emulator screenshots or downloadable APK have been confirmed yet.
+- No changes have been made to the separate VibeDownloader repository as part of VibeApply work.
 
 ## Current status
-Milestone 1 implementation pushed; build and emulator checks pending.
-- Images to PDF: select multiple images; each becomes a fitted A4 page; save through Android's Create Document picker.
-- Image Compressor: select an image; choose a target size in KB; compress to JPEG locally; save through Android's Create Document picker.
-- No broad storage permission or cloud account is requested.
-- UI uses a black/dark + red theme.
-- Next: verify GitHub Actions results, fix compile/runtime issues, inspect emulator screenshots, then implement further document tools.
+Milestone 1 code is pushed; automated build and emulator verification are pending.
+Known limitations before verification:
+- Image rotation/EXIF orientation handling is not yet implemented.
+- The selected target size is best-effort; extremely low KB targets may not be achievable without more image quality loss.
+- Only Images to PDF and Image Compressor are implemented; other tools remain planned, not implemented.
+
+## Next actions
+1. Recheck workflow runs 45216958774 and 45216958721.
+2. If build fails, inspect Gradle logs, patch source/build files, push a fix, and re-run CI.
+3. If emulator tests pass, download and visually inspect API 29/34 screenshots and logs.
+4. Add tests for PDF creation and image compression, including edge cases.
+5. Then add document crop/rotate and OCR in a separate milestone.
 
 ## Session handoff
 When continuing, first verify the authenticated account is still jhfarhan, verify the target repository is still jhfarhan/VibeApply, inspect the latest commit and workflow runs, then continue from the latest recorded milestone. Do not rely on conversational memory alone.
