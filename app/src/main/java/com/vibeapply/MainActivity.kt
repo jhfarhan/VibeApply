@@ -10,7 +10,6 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Matrix
 import android.graphics.pdf.PdfRenderer
-import android.os.ParcelFileDescriptor
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Bundle
@@ -98,6 +97,7 @@ private fun VibeApplyApp() {
     var compressImage by remember { mutableStateOf<Uri?>(null) }
     var targetKb by remember { mutableStateOf("200") }
     var photoImage by remember { mutableStateOf<Uri?>(null) }
+    var photoRotation by remember { mutableStateOf(0) }
     var ocrImage by remember { mutableStateOf<Uri?>(null) }
     var ocrText by remember { mutableStateOf("") }
     var pdfSource by remember { mutableStateOf<Uri?>(null) }
@@ -131,6 +131,7 @@ private fun VibeApplyApp() {
     }
     val pickPhotoImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { selected ->
         photoImage = selected
+        photoRotation = 0
         status = if (selected == null) "No image selected." else "Photo selected. Choose an output size."
     }
     val pickOcrImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { selected ->
@@ -249,7 +250,7 @@ private fun VibeApplyApp() {
                 busy = true
                 status = "Resizing photo offline…"
                 val result = withContext(Dispatchers.IO) {
-                    runCatching { resizePhotoToPreset(context, source, destination, preset) }
+                    runCatching { resizePhotoToPreset(context, source, destination, preset, photoRotation) }
                 }
                 status = result.fold(
                     { bytes -> "Photo saved • " + ((bytes + 1023) / 1024) + " KB • " + preset.width + " × " + preset.height + " px." },
@@ -389,6 +390,20 @@ private fun VibeApplyApp() {
                         }
                     }
                     Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { photoRotation = (photoRotation + 270) % 360 },
+                            enabled = photoImage != null && !busy,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Rotate left") }
+                        OutlinedButton(
+                            onClick = { photoRotation = (photoRotation + 90) % 360 },
+                            enabled = photoImage != null && !busy,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Rotate right") }
+                    }
+                    Text("Rotation: " + photoRotation + "°", color = TextMuted, fontSize = 12.sp)
+                    Spacer(Modifier.height(8.dp))
                     InfoPanel(
                         if (photoImage == null) "No photo selected" else "Photo ready",
                         "The image is center-cropped to the selected aspect ratio and resized to the exact pixel dimensions. Check that the crop keeps the subject correctly framed."
@@ -730,39 +745,53 @@ private fun resizePhotoToPreset(
     context: android.content.Context,
     source: Uri,
     destination: Uri,
-    preset: PhotoPreset
+    preset: PhotoPreset,
+    rotationDegrees: Int
 ): Long {
     val input = decodeScaledBitmap(context, source)
-    val output = Bitmap.createBitmap(preset.width, preset.height, Bitmap.Config.ARGB_8888)
+    var rotatedBitmap: Bitmap? = null
     try {
-        val sourceRatio = input.width.toFloat() / input.height.toFloat()
-        val targetRatio = preset.width.toFloat() / preset.height.toFloat()
-        val crop = if (sourceRatio > targetRatio) {
-            val cropWidth = (input.height * targetRatio).toInt().coerceIn(1, input.width)
-            val left = (input.width - cropWidth) / 2
-            Rect(left, 0, left + cropWidth, input.height)
+        val oriented = if (rotationDegrees % 360 == 0) {
+            input
         } else {
-            val cropHeight = (input.width / targetRatio).toInt().coerceIn(1, input.height)
-            val top = (input.height - cropHeight) / 2
-            Rect(0, top, input.width, top + cropHeight)
+            Bitmap.createBitmap(
+                input, 0, 0, input.width, input.height,
+                Matrix().apply { postRotate(rotationDegrees.toFloat()) }, true
+            ).also { rotatedBitmap = it }
         }
-        val canvas = Canvas(output)
-        canvas.drawBitmap(
-            input, crop, Rect(0, 0, preset.width, preset.height),
-            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        )
-        val bytes = ByteArrayOutputStream().use { stream ->
-            if (!output.compress(Bitmap.CompressFormat.JPEG, 92, stream)) {
-                throw IOException("Could not encode resized photo")
+        val output = Bitmap.createBitmap(preset.width, preset.height, Bitmap.Config.ARGB_8888)
+        try {
+            val sourceRatio = oriented.width.toFloat() / oriented.height.toFloat()
+            val targetRatio = preset.width.toFloat() / preset.height.toFloat()
+            val crop = if (sourceRatio > targetRatio) {
+                val cropWidth = (oriented.height * targetRatio).toInt().coerceIn(1, oriented.width)
+                val left = (oriented.width - cropWidth) / 2
+                Rect(left, 0, left + cropWidth, oriented.height)
+            } else {
+                val cropHeight = (oriented.width / targetRatio).toInt().coerceIn(1, oriented.height)
+                val top = (oriented.height - cropHeight) / 2
+                Rect(0, top, oriented.width, top + cropHeight)
             }
-            stream.toByteArray()
+            val canvas = Canvas(output)
+            canvas.drawBitmap(
+                oriented, crop, Rect(0, 0, preset.width, preset.height),
+                Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            )
+            val bytes = ByteArrayOutputStream().use { stream ->
+                if (!output.compress(Bitmap.CompressFormat.JPEG, 92, stream)) {
+                    throw IOException("Could not encode resized photo")
+                }
+                stream.toByteArray()
+            }
+            context.contentResolver.openOutputStream(destination, "w")?.use { it.write(bytes) }
+                ?: throw IOException("Could not open destination file")
+            return bytes.size.toLong()
+        } finally {
+            output.recycle()
         }
-        context.contentResolver.openOutputStream(destination, "w")?.use { it.write(bytes) }
-            ?: throw IOException("Could not open destination file")
-        return bytes.size.toLong()
     } finally {
+        rotatedBitmap?.recycle()
         input.recycle()
-        output.recycle()
     }
 }
 
