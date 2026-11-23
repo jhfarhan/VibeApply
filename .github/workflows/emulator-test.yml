@@ -1,0 +1,67 @@
+name: Android emulator smoke test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emulator-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [29, 34]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Run app on Android API ${{ matrix.api }}
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          script: |
+            gradle :app:assembleDebug --no-daemon
+            adb install -r app/build/outputs/apk/debug/app-debug.apk
+            adb logcat -c
+            adb shell am start -W -n com.vibeapply/.MainActivity
+            sleep 5
+            mkdir -p emulator-shots
+            adb exec-out screencap -p > emulator-shots/home.png
+            adb shell input tap 500 700
+            sleep 2
+            adb exec-out screencap -p > emulator-shots/tool-screen.png
+            adb logcat -d -v time > emulator-shots/logcat.txt
+            if grep -q "FATAL EXCEPTION" emulator-shots/logcat.txt; then
+              echo "App crashed on emulator"
+              exit 1
+            fi
+      - name: Upload emulator screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VibeApply-emulator-api${{ matrix.api }}-${{ github.run_number }}
+          path: emulator-shots/
+          if-no-files-found: warn
+          retention-days: 7
