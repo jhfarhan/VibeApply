@@ -2,6 +2,8 @@ package com.vibeapply
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.graphics.Canvas
 import android.graphics.Rect
 import android.graphics.Paint
@@ -30,6 +32,9 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import kotlin.math.max
@@ -58,7 +63,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Page { HOME, PDF, COMPRESS, PHOTO, CHECKLIST }
+private enum class Page { HOME, PDF, COMPRESS, PHOTO, CHECKLIST, OCR }
 
 private data class PhotoPreset(val label: String, val width: Int, val height: Int)
 
@@ -90,6 +95,8 @@ private fun VibeApplyApp() {
     var compressImage by remember { mutableStateOf<Uri?>(null) }
     var targetKb by remember { mutableStateOf("200") }
     var photoImage by remember { mutableStateOf<Uri?>(null) }
+    var ocrImage by remember { mutableStateOf<Uri?>(null) }
+    var ocrText by remember { mutableStateOf("") }
     var selectedPhotoPreset by remember { mutableStateOf(0) }
     var photoPresetMenu by remember { mutableStateOf(false) }
     val localPrefs = remember { context.getSharedPreferences("vibeapply_local", android.content.Context.MODE_PRIVATE) }
@@ -113,6 +120,11 @@ private fun VibeApplyApp() {
     val pickPhotoImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { selected ->
         photoImage = selected
         status = if (selected == null) "No image selected." else "Photo selected. Choose an output size."
+    }
+    val pickOcrImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { selected ->
+        ocrImage = selected
+        ocrText = ""
+        status = if (selected == null) "No image selected." else "Image ready for on-device text extraction."
     }
     val createPdf = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { destination ->
         if (destination != null) {
@@ -211,6 +223,11 @@ private fun VibeApplyApp() {
                         page = Page.CHECKLIST
                         status = "Your checklist is saved only on this device."
                     }
+                    Spacer(Modifier.height(12.dp))
+                    ToolCard("OCR", "Image Text Extractor", "Read printed Latin-script text from a photo without uploading it.") {
+                        page = Page.OCR
+                        status = "Choose an image to extract text on this device."
+                    }
                     Spacer(Modifier.height(20.dp))
                     Card(colors = CardDefaults.cardColors(containerColor = SurfaceDark)) {
                         Column(Modifier.padding(16.dp)) {
@@ -294,6 +311,69 @@ private fun VibeApplyApp() {
                     PrimaryButton("Resize and save JPEG", photoImage != null && !busy) {
                         createPhoto.launch("VibeApply-photo.jpg")
                     }
+                }
+                Page.OCR -> {
+                    BackHeader("Image Text Extractor") { page = Page.HOME }
+                    Text("Extract printed text from an image with on-device recognition.", color = TextMuted, fontSize = 14.sp)
+                    Spacer(Modifier.height(18.dp))
+                    OutlinedButton(
+                        onClick = { pickOcrImage.launch(arrayOf("image/*")) },
+                        enabled = !busy, modifier = Modifier.fillMaxWidth()
+                    ) { Text(if (ocrImage == null) "Choose an image" else "Change image") }
+                    Spacer(Modifier.height(10.dp))
+                    InfoPanel(
+                        if (ocrImage == null) "No image selected" else "Image ready",
+                        "This build recognizes Latin-script text (such as English and numbers). Bangla text recognition is not included yet. Processing stays on this device."
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    PrimaryButton("Extract text", ocrImage != null && !busy) {
+                        val source = ocrImage
+                        if (source != null) {
+                            busy = true
+                            status = "Recognizing text on this device…"
+                            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                            try {
+                                val image = InputImage.fromFilePath(context, source)
+                                recognizer.process(image)
+                                    .addOnSuccessListener { result ->
+                                        ocrText = result.text
+                                        status = if (result.text.isBlank()) "No readable text was found. Try a sharper, well-lit image." else "Text extracted. You can edit it or copy it below."
+                                        busy = false
+                                        recognizer.close()
+                                    }
+                                    .addOnFailureListener { error ->
+                                        status = "Text extraction failed: " + (error.localizedMessage ?: "Unknown error")
+                                        busy = false
+                                        recognizer.close()
+                                    }
+                            } catch (error: Exception) {
+                                recognizer.close()
+                                status = "Could not read this image: " + (error.localizedMessage ?: "Unknown error")
+                                busy = false
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    OutlinedTextField(
+                        value = ocrText,
+                        onValueChange = { ocrText = it },
+                        label = { Text("Extracted text") },
+                        placeholder = { Text("The recognized text will appear here.") },
+                        minLines = 6,
+                        maxLines = 14,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !busy
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(ClipboardManager::class.java)
+                            clipboard?.setPrimaryClip(ClipData.newPlainText("VibeApply extracted text", ocrText))
+                            status = "Text copied to clipboard."
+                        },
+                        enabled = ocrText.isNotBlank() && !busy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Copy extracted text") }
                 }
                 Page.CHECKLIST -> {
                     BackHeader("Application Checklist") { page = Page.HOME }
